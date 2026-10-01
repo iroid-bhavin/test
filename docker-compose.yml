@@ -1,0 +1,36 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      retries: 10
+
+  app:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: 3000
+      META_DATABASE_URL: postgres://postgres:postgres@postgres:5432/orders_meta
+      SHARD_URLS: postgres://postgres:postgres@postgres:5432/orders_shard_0,postgres://postgres:postgres@postgres:5432/orders_shard_1,postgres://postgres:postgres@postgres:5432/orders_shard_2
+      GCP_PROJECT_ID: ${GCP_PROJECT_ID}
+      GCS_BUCKET_NAME: ${GCS_BUCKET_NAME}
+      # ADC file created by "gcloud auth application-default login", mounted read-only
+      GOOGLE_APPLICATION_CREDENTIALS: /gcloud/application_default_credentials.json
+    volumes:
+      - ${GCLOUD_CONFIG_DIR:-~/.config/gcloud}:/gcloud:ro
+
+volumes:
+  pgdata:

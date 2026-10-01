@@ -1,0 +1,9 @@
+node_modules/
+.env
+sample/
+
+# Never commit Google credentials
+*.json.key
+*-key.json
+service-account*.json
+application_default_credentials.json
