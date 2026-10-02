@@ -27,10 +27,10 @@ services:
       SHARD_URLS: postgres://postgres:postgres@postgres:5432/orders_shard_0,postgres://postgres:postgres@postgres:5432/orders_shard_1,postgres://postgres:postgres@postgres:5432/orders_shard_2
       GCP_PROJECT_ID: ${GCP_PROJECT_ID}
       GCS_BUCKET_NAME: ${GCS_BUCKET_NAME}
-      # ADC file created by "gcloud auth application-default login", mounted read-only
+      # Google login file, copied into the project root
       GOOGLE_APPLICATION_CREDENTIALS: /gcloud/application_default_credentials.json
     volumes:
-      - ${GCLOUD_CONFIG_DIR:-~/.config/gcloud}:/gcloud:ro
+      - ./application_default_credentials.json:/gcloud/application_default_credentials.json:ro
 
 volumes:
   pgdata:
