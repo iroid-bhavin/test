@@ -5,7 +5,7 @@ const crypto = require("crypto");
 const { ORDER_STATUSES } = require("../validations/OrderValidation");
 
 const rowCount = Number(process.argv[2]) || 10000;
-const outputFile = process.argv[3] || path.join(__dirname, "../sample/orders.csv");
+const outputFile = process.argv[3] || path.join(__dirname, "../orders.csv");
 
 const pick = (list) => list[Math.floor(Math.random() * list.length)];
 const randomDate = () => new Date(Date.now() - Math.random() * 365 * 24 * 60 * 60 * 1000).toISOString();

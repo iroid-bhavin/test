@@ -1,6 +1,8 @@
 node_modules/
 .env
-sample/
+
+# Generated test data
+orders.csv
 
 # Never commit Google credentials
 *.json.key

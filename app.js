@@ -25,7 +25,3 @@ const port = Number(process.env.PORT) || 3000;
 app.listen(port, () => {
   logger.info(`Server listening on port ${port}`);
 });
-
-process.on("unhandledRejection", (error) => {
-  logger.error("Unhandled rejection", { error: error?.message });
-});

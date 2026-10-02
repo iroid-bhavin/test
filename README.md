@@ -1,75 +1,36 @@
-# Orders Ingestion Service
+# Orders Service
 
-Node.js + Express service that accepts an orders CSV (~10,000 rows), stores the file in Google Cloud Storage using Application Default Credentials (ADC), then streams, validates and batch-inserts the rows into a **sharded PostgreSQL** setup.
+Upload a CSV of orders. The file is saved to Google Cloud Storage, then the rows are checked and stored in PostgreSQL. Orders are split across 3 databases (shards) by `customer_id`.
 
-## Flow
+Built with Node.js, Express, Sequelize and PostgreSQL.
 
-```
-POST /upload-orders (CSV)
-   │  multer writes the file to a temp file on disk (never fully in memory)
-   ▼
-uploads row created (status: uploading)
-   │
-   ▼
-File streamed to GCS  ──fail──▶  502 + upload marked "failed"
-   │
-   ▼
-202 Accepted { uploadId }       ◀── client polls GET /uploads/:uploadId
-   │
-   ▼  background queue
-Stream CSV row by row ─▶ validate (Joi) ─▶ route to shard by customer_id
-   │                         │
-   │                         └─ invalid ─▶ failed_rows table + log
-   ▼
-Batch of 500 per shard ─▶ one INSERT ... UNNEST inside a transaction (with retry)
-   │
-   ▼
-uploads row updated (completed / failed + counts)
-```
+## How it works
 
-## Project structure
+1. `POST /upload-orders` receives the CSV and saves it to Google Cloud Storage.
+2. The API answers right away with an `uploadId`. The rows are processed in the background.
+3. Each row is validated. Valid rows are inserted in batches of 500 into the shard that belongs to the customer. Invalid rows are saved in the `failed_rows` table with the reason.
+4. `GET /uploads/:uploadId` shows the progress and counts.
 
-```
-app.js                      Express setup
-config/connection.js        Sequelize instances (meta + one per shard) and models
-controllers/                Request handlers (upload, orders, health)
-routes/                     Route definitions
-middleware/                 Joi validation, multer upload, error handler
-models/                     Sequelize model definitions + data access for orders and uploads
-services/StorageService.js  GCS upload via ADC
-services/OrderImportService.js  Streaming parse, validation, batching, shard routing
-jobs/ImportQueue.js         Background job queue
-validations/                Joi schemas (CSV row + request params)
-utils/                      Shard router, retry, logger
-db/init/                    Creates the databases in docker-compose
-scripts/                    migrate (sequelize.sync) + sample data generator
-tests/                      Unit tests (node:test)
-```
+Uploading the same file again does not create duplicates, because `order_id` is unique.
+
+## Requirements
+
+- Node.js 20+
+- Docker, or PostgreSQL 14+
+- A Google Cloud project with a storage bucket
 
 ## Setup
 
-### Requirements
-
-- Node.js 20+ (tested on 24)
-- PostgreSQL 14+ (or Docker)
-- Google Cloud SDK (`gcloud`) and a GCS bucket
-
-### 1. Configure Google ADC
-
-No key files are used or committed. The `@google-cloud/storage` client finds credentials automatically through ADC.
+### 1. Google Cloud login
 
 ```bash
 gcloud auth login
 gcloud config set project YOUR_PROJECT_ID
 gcloud auth application-default login
-
-# create a bucket if you don't have one
-gcloud storage buckets create gs://YOUR_BUCKET --location=asia-south1
+gcloud storage buckets create gs://YOUR_BUCKET
 ```
 
-The logged-in account needs `roles/storage.objectCreator` (or `objectAdmin`) on the bucket.
-
-When deployed (Cloud Run / GKE), skip the login: attach a service account through workload identity and ADC picks it up with no code change.
+The last login creates `application_default_credentials.json` (on Windows in `%APPDATA%\gcloud`). Copy that file into the project root. It is git-ignored.
 
 ### 2. Environment
 
@@ -77,26 +38,19 @@ When deployed (Cloud Run / GKE), skip the login: attach a service account throug
 cp .env.example .env
 ```
 
-Set `GCP_PROJECT_ID`, `GCS_BUCKET_NAME`, `META_DATABASE_URL` and `SHARD_URLS`.
+Set `GCP_PROJECT_ID` and `GCS_BUCKET_NAME` in `.env`.
 
-### 3a. Run with Docker (recommended)
+### 3. Run with Docker
 
 ```bash
-# Linux / macOS (ADC file lives in ~/.config/gcloud)
-GCP_PROJECT_ID=xxx GCS_BUCKET_NAME=yyy docker compose up --build
-```
-
-```powershell
-# Windows (ADC file lives in %APPDATA%\gcloud)
-$env:GCLOUD_CONFIG_DIR="$env:APPDATA\gcloud"; $env:GCP_PROJECT_ID="xxx"; $env:GCS_BUCKET_NAME="yyy"
 docker compose up --build
 ```
 
-This starts PostgreSQL with 4 databases (`orders_meta`, `orders_shard_0..2`), runs migrations, and starts the API on port 3000. The ADC file is mounted read-only into the container.
+This starts PostgreSQL, creates the tables and starts the API on port 3000.
 
-### 3b. Run locally
+### 3. Or run locally
 
-Create the databases (see `db/init/create-databases.sql`), then:
+Create the databases in `db/init/create-databases.sql`, set the database URLs in `.env`, then:
 
 ```bash
 npm install
@@ -104,82 +58,70 @@ npm run migrate
 npm run dev
 ```
 
-### 4. Try it
+`npm run migrate` creates the tables.
+
+## Try it
 
 ```bash
-npm run generate:orders            # writes sample/orders.csv (10,000 rows, ~1% invalid)
-
-curl -F "file=@sample/orders.csv" http://localhost:3000/upload-orders
+npm run generate:orders
+curl -F "file=@orders.csv" http://localhost:3000/upload-orders
 curl http://localhost:3000/uploads/<uploadId>
 curl "http://localhost:3000/orders?customerId=CUST-0001"
-curl http://localhost:3000/orders/<orderId>
 curl http://localhost:3000/health
 ```
 
-### Tests
+`npm run generate:orders` writes `orders.csv` with 10,000 fake rows. About 1% are invalid on purpose.
 
-```bash
-npm test
-```
+Run the tests with `npm test`.
 
 ## API
 
-| Method | Path | Description |
+| Method | Path | What it does |
 |---|---|---|
-| POST | `/upload-orders` | multipart/form-data, field `file` (.csv). Uploads to GCS, queues processing, returns `202` with `uploadId` |
-| GET | `/uploads/:uploadId` | Processing status, row counts and up to 100 failed rows with reasons |
-| GET | `/orders/:orderId` | Single order. Optional `?customerId=` routes straight to one shard |
-| GET | `/orders?customerId=` | Orders of a customer, newest first. `limit` (max 500) and `offset` supported |
-| GET | `/health` | DB status per shard, uptime, pending import jobs |
+| POST | `/upload-orders` | Upload a `.csv` (form field `file`) |
+| GET | `/uploads/:uploadId` | Upload status, row counts, first 100 failed rows |
+| GET | `/orders?customerId=` | Orders of one customer, newest first. Optional `limit` (max 500) and `offset` |
+| GET | `/orders/:orderId` | One order. Add `?customerId=` to make it faster |
+| GET | `/health` | Database status, uptime, pending imports |
 
-### CSV format
+## CSV format
 
 ```csv
 order_id,customer_id,order_date,order_amount,status
 0b6c2f1e-6b7a-4b8e-9a37-2f1f5f4d9c11,CUST-0001,2025-05-01T10:30:00Z,199.99,shipped
 ```
 
-- `order_id`: UUID or any id of letters, digits, `-`, `_` (max 64)
-- `order_date`: ISO 8601
-- `order_amount`: number ≥ 0, 2 decimals (`order_amout` header from the spec is also accepted)
-- `status`: `pending | confirmed | shipped | delivered | cancelled | returned` (case-insensitive)
+- `order_id`: letters, numbers, `-` or `_`, up to 64 characters
+- `order_date`: ISO 8601 date
+- `order_amount`: number from 0, up to 2 decimals
+- `status`: pending, confirmed, shipped, delivered, cancelled or returned
 
-Extra columns are ignored. Invalid rows are skipped, logged, and stored in `failed_rows` with the reason.
+Extra columns are ignored.
 
-## Sharding strategy
+## Sharding
 
-**Approach:** application-level sharding across multiple PostgreSQL databases.
+Orders are stored in 3 databases. The shard is picked from the customer id:
 
-**Shard key:** `customer_id`.
+```
+shard = md5(customer_id) → number → % 3
+```
 
-**Routing:** `shard = md5(customer_id) first 4 bytes % number_of_shards` (`utils/ShardRouter.js`). Shards are listed in `SHARD_URLS`; their position in that list is the shard number.
+The same customer always goes to the same shard, so "orders of a customer" reads from one database only. Looking up an order without `customerId` searches all 3 shards.
 
-Why `customer_id`:
+The shard order in `SHARD_URLS` must not change once there is data. Changing it or adding a shard moves customers to different shards.
 
-- The most common read, "orders of a customer", hits exactly **one** shard.
-- All orders of a customer live together, so per-customer reports need no cross-shard joins.
-- md5 spreads customers evenly (covered by a unit test), so no single shard gets hot from sequential ids.
+Uploads and failed rows are kept in a separate meta database (`orders_meta`).
 
-How inserts land on the right shard: each validated row is routed by its `customer_id` into that shard's in-memory batch. When a batch reaches `BATCH_SIZE` it's written to that shard's pool only.
+## Project folders
 
-Lookup by `order_id` alone does not know the shard, so it queries all shards **in parallel** and returns the match. With a few shards this is cheap; passing `?customerId=` skips the fan-out.
-
-The meta database (`uploads`, `failed_rows`) is separate from the shards because it's small, low-traffic job bookkeeping, not order data.
-
-## Design decisions & trade-offs
-
-- **Streaming, not buffering.** Multer writes to disk, GCS upload streams from disk, `csv-parse` reads row by row, and `for await` pauses the stream while a batch is being written (natural backpressure). Importing 10k rows uses ~12 MB of heap.
-- **Batch insert with Sequelize.** One multi-row `INSERT ... ON CONFLICT DO NOTHING RETURNING order_id` per batch (Sequelize `bulkInsert` with `ignoreDuplicates`), inside a transaction. `RETURNING` gives the exact number of new rows. Sequelize inlines escaped values, so there is no 65k bind-parameter limit.
-- **Idempotency.** `order_id` is the primary key and inserts use `ON CONFLICT DO NOTHING`. Re-uploading the same file (or retrying a batch) never creates duplicates; the duplicate count is reported in the upload status.
-- **Retry.** Each batch insert retries 3 times with exponential backoff. If it still fails, those rows go to `failed_rows` with the DB error instead of aborting the whole file.
-- **Background processing.** The API responds `202` as soon as the file is safely in GCS; parsing and inserting run in a queue. Status is persisted in `uploads` so it survives restarts and is visible from any instance.
-- **Validation errors are data, not exceptions.** Bad rows don't stop the import; they're counted, logged, and stored with the raw row for later fixing.
-- **Data types.** `NUMERIC(12,2)` for money (no float rounding), `TIMESTAMPTZ` for dates, `VARCHAR(64)` ids so both UUIDs and business ids work. Composite index `(customer_id, order_date DESC)` serves the customer listing query directly.
-
-### Known limitations
-
-- **Modulo sharding and resharding.** Adding a shard changes `hash % N` for most customers, so data must be moved. A production version would use consistent hashing or a fixed number of virtual buckets mapped to physical shards.
-- **`order_id` uniqueness is per shard.** If the same `order_id` arrives with a different `customer_id`, it lands on another shard and both are stored. A global id registry or sharding by `order_id` would prevent this, at the cost of customer queries fanning out.
-- **In-process queue.** Jobs live in memory; if the process restarts mid-import, the upload stays `processing`. Since the file is in GCS and inserts are idempotent, re-uploading is safe. A production setup would use Pub/Sub, Cloud Tasks or BullMQ with workers reading from GCS.
-- **CSV only** (the spec allows choosing CSV or Excel).
-- **Docker runs all shards in one Postgres server** for convenience. In production each `SHARD_URLS` entry points to its own server.
+```
+config/       database connections
+models/       Sequelize models and queries
+controllers/  request handlers
+routes/       URLs
+services/     Google Cloud upload, CSV import
+jobs/         background import queue
+validations/  Joi checks
+scripts/      migrate, generate test CSV
+tests/        unit tests
+```
